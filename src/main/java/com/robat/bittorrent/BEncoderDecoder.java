@@ -1,219 +1,248 @@
 package com.robat.bittorrent;
 
+import java.io.ByteArrayOutputStream;
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.*;
 
+/**
+ * Prosta implementacja bencodowania/odbencowania danych w stylu BitTorrent.
+ *
+ * <p>Kluczowe punkty:
+ *   - Wszystkie klucze słowników przechowywane są jako String (UTF‑8).
+ *   - Funkcje `bencode` i `bdecode` obsługują: int, byte[], String, List<Object>, Map<String,Object>.
+ *   - Dla listy i mapy używamy rekursji.
+ */
 public class BEncoderDecoder {
 
-    // Funkcja do parsowania liczb (bencode integer 'i...e')
-    private static int parseInt(byte[] data, int i) throws IllegalArgumentException {
-        if (data[i] != 105) { // ord('i') == 105
-            throw new IllegalArgumentException("Expected 'i' for integer");
-        }
-        int j = findChar(data, i + 1, 101); // Find 'e' (ord('e') == 101)
-        String valStr = new String(Arrays.copyOfRange(data, i + 1, j), StandardCharsets.UTF_8);
-        return Integer.parseInt(valStr);
+    /* ---------- 1. Dekodowanie ---------- */
+
+    /**
+     * Dekoduje dane bencoded (byte[]) i zwraca obiekt Java.
+     *
+     * @param data bajty z pliku .torrent
+     * @return dekodowany obiekt
+     */
+    public static Object bdecode(byte[] data) {
+        if (data == null || data.length == 0)
+            throw new IllegalArgumentException("Empty input");
+
+        DecodeResult result = parseAny(data, 0);
+        if (result.index != data.length)
+            throw new IllegalArgumentException(
+                    "Extra data after parsing at index " + result.index);
+
+        return result.value;
     }
 
-    // Funkcja do parsowania stringów (bencode string 'length:content')
-    private static byte[] parseString(byte[] data, int i) throws IllegalArgumentException {
-        if (!isDigit(data[i])) {
-            throw new IllegalArgumentException("Expected length prefix for string");
+    /* ---------- 2. Kodowanie ---------- */
+
+    /**
+     * Koduje dowolny obiekt Java do formatu bencoded.
+     *
+     * @param obj obiekt do zakodowania
+     * @return bajty z kodem bencoded
+     */
+    public static byte[] bencode(Object obj) {
+        if (obj instanceof Integer)
+            return encodeInt((Integer) obj);
+
+        if (obj instanceof String)
+            return encodeString(((String) obj).getBytes(StandardCharsets.UTF_8));
+
+        if (obj instanceof byte[])
+            return encodeString((byte[]) obj);
+
+        if (obj instanceof List<?>)
+            return encodeList((List<?>) obj);
+
+        if (obj instanceof Map<?, ?>)
+            return encodeDict((Map<String, Object>) obj);
+
+        throw new IllegalArgumentException(
+                "Unsupported type for bencoding: " + obj.getClass().getName());
+    }
+
+    /* ---------- 3. Pomocnicze metody kodowania ---------- */
+
+    private static byte[] encodeInt(Integer i) {
+        return ("i" + i + "e").getBytes(StandardCharsets.UTF_8);
+    }
+
+    private static byte[] encodeString(byte[] data) {
+        String len = Integer.toString(data.length);
+        return (len + ":" + new String(data, StandardCharsets.ISO_8859_1))
+                .getBytes(StandardCharsets.ISO_8859_1);
+    }
+
+    private static byte[] encodeList(List<?> list) {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        out.write('l');
+        for (Object item : list)
+            try { out.write(bencode(item)); } catch (IOException e) {}
+        out.write('e');
+        return out.toByteArray();
+    }
+
+    private static byte[] encodeDict(Map<String, Object> dict) {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        out.write('d');
+
+        // Keys must be sorted lexicographically
+        List<String> keys = new ArrayList<>(dict.keySet());
+        Collections.sort(keys);
+
+        for (String key : keys) {
+            try {
+                out.write(encodeString(key.getBytes(StandardCharsets.UTF_8)));
+                out.write(bencode(dict.get(key)));
+            } catch (IOException e) {}
         }
-        int j = findChar(data, i + 1, 58); // Find ':' (ord(':') == 58)
-        String lenStr = new String(Arrays.copyOfRange(data, i, j), StandardCharsets.UTF_8);
+        out.write('e');
+        return out.toByteArray();
+    }
+
+    /* ---------- 4. Pomocnicze metody dekodowania ---------- */
+
+    private static class DecodeResult {
+        Object value;
+        int index; // po zakończeniu parsowania
+
+        DecodeResult(Object v, int i) { value = v; index = i; }
+    }
+
+    /** Rozpoczyna interpretację od indeksu 0 */
+    private static DecodeResult parseAny(byte[] data, int idx) {
+        byte first = data[idx];
+        if (first == 'i')
+            return parseInt(data, idx);
+        if (first == 'l')
+            return parseList(data, idx);
+        if (first == 'd')
+            return parseDict(data, idx);
+        if (Character.isDigit(first))
+            return parseString(data, idx);
+
+        throw new IllegalArgumentException(
+                "Invalid bencode type at index " + idx + ": " + (char) first);
+    }
+
+    private static DecodeResult parseInt(byte[] data, int idx) {
+        // format: i<digits>e
+        int end = indexOfByte(data, (byte) 'e', idx + 1);
+        String num = new String(data, idx + 1, end - idx - 1, StandardCharsets.UTF_8);
+        return new DecodeResult(Integer.parseInt(num), end + 1);
+    }
+
+    private static DecodeResult parseString(byte[] data, int idx) {
+        // format: <len>:<bytes>
+        int colon = indexOfByte(data, (byte) ':', idx);
+        String lenStr = new String(data, idx, colon - idx, StandardCharsets.UTF_8);
         int length = Integer.parseInt(lenStr);
 
-        return Arrays.copyOfRange(data, j + 1, j + 1 + length); // Extract actual data
+        int start = colon + 1;
+        byte[] bytes = Arrays.copyOfRange(data, start, start + length);
+        return new DecodeResult(bytes, start + length);
     }
 
-    // Funkcja do parsowania list (bencode list 'l...e')
-    private static List<Object> parseList(byte[] data, int i) throws IllegalArgumentException {
-        if (data[i] != 108) { // ord('l') == 108
-            throw new IllegalArgumentException("Expected 'l' for list");
+    private static DecodeResult parseList(byte[] data, int idx) {
+        // format: l<items>e
+        List<Object> list = new ArrayList<>();
+        int pos = idx + 1;   // po 'l'
+        while (data[pos] != 'e') {
+            DecodeResult item = parseAny(data, pos);
+            list.add(item.value);
+            pos = item.index;
         }
-        ArrayList<Object> arr = new ArrayList<>();
-        while (i < data.length && data[i] != 101) { // ord('e') == 101
-            Object val = parseAny(data, i);
-            arr.add(val);
-        }
-        return arr;
+        return new DecodeResult(list, pos + 1); // po 'e'
     }
 
-    // Funkcja do parsowania słownika (bencode dict 'd...e')
-    private static Map<Byte[], Object> parseDict(byte[] data, int i) throws IllegalArgumentException {
-        if (data[i] != 100) { // ord('d') == 100
-            throw new IllegalArgumentException("Expected 'd' for dict");
-        }
-        HashMap<Byte[], Object> d = new LinkedHashMap<>(); // Use LinkedHashMap to maintain order consistency
-        while (i < data.length && data[i] != 101) { // ord('e') == 101
-            byte[] key = parseString(data, i);
-            int nextIndex = i + parseStringLength(data, i + parseStringLength(data, i)) - 1;
+    private static DecodeResult parseDict(byte[] data, int idx) {
+        Map<String, Object> map = new LinkedHashMap<>();
+        int pos = idx + 1;   // po 'd'
+        while (data[pos] != 'e') {
+            // klucz
+            DecodeResult keyRes = parseString(data, pos);
+            String key = new String((byte[]) keyRes.value, StandardCharsets.UTF_8);
 
-            Object val = parseAny(data, i);
-            d.put(key, val);
+            // wartość
+            DecodeResult valRes = parseAny(data, keyRes.index);
+
+            map.put(key, valRes.value);
+            pos = valRes.index;
         }
-        return d;
+        return new DecodeResult(map, pos + 1); // po 'e'
     }
 
-    // Wsparcie dynamicznego wykrywania typu danych w parsowaniu (bencode any)
-    private static Object parseAny(byte[] data, int i) throws IllegalArgumentException {
-        byte b = data[i];
-        if (b == 105) { // 'i' - integer
-            return parseInt(data, i);
-        } else if (b == 108) { // 'l' - list
-            return parseList(data, i);
-        } else if (b == 100) { // 'd' - dict
-            return parseDict(data, i);
-        } else if (isDigit(b)) { // Number followed by ':' indicates string
-            return parseString(data, i);
-        } else {
-            throw new IllegalArgumentException("Invalid bencode type at index " + i + ": " + (char)b);
-        }
-    }
-
-    // Funkcja pomocnicza do szukania znaku w tablicy bajtów
-    private static int findChar(byte[] data, int startIndex, int target) {
-        for (int i = startIndex; i < data.length; i++) {
+    private static int indexOfByte(byte[] data, byte target, int start) {
+        for (int i = start; i < data.length; i++) {
             if (data[i] == target) return i;
         }
-        throw new IllegalArgumentException("Expected character not found");
+        throw new IllegalArgumentException("Expected byte " + (char) target + " not found");
     }
 
-    // Pomocnicza do sprawdzania czy bajt jest cyfrą ASCII
-    private static boolean isDigit(byte b) {
-        return b >= '0' && b <= '9';
+    /* ---------- 5. Czytanie pliku .torrent ---------- */
+
+    /**
+     * Wczytuje cały plik .torrent, dekoduje go i zwraca mapę z kluczem „info”.
+     *
+     * @return mapa odpowiadająca sekcji "info" w torrentcie
+     */
+    public static Map<String, Object> readTorrentInfo(String path, boolean isResources) throws IOException {
+        byte[] data = isResources ? readTorrentFromResources(path) : Files.readAllBytes(Paths.get(path));
+        Object root = bdecode(data);
+
+        if (!(root instanceof Map))
+            throw new IllegalArgumentException("Root element is not a dictionary");
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> torrentMap = (Map<String, Object>) root;
+
+        Object infoObj = torrentMap.get("info");
+        if (!(infoObj instanceof Map))
+            throw new IllegalArgumentException("'info' entry is missing or not a dict");
+
+        return (Map<String, Object>) infoObj;
     }
 
-    // Funkcja pomocnicza: obliczanie długości stringu z nagłówka (długość + ':' - 1)
-    private static int parseStringLength(int i, byte[] data) {
-        StringBuilder sb = new StringBuilder();
-        while (i < data.length && isDigit(data[i])) {
-            sb.append(data[i]);
-            i++;
-        }
-        return Integer.parseInt(sb.toString());
-    }
+    public static byte[] readTorrentFromResources(String resourceName) throws IOException {
+        try (InputStream in = BEncoderDecoder.class.getClassLoader()
+                .getResourceAsStream(resourceName)) {
+            if (in == null)
+                throw new FileNotFoundException("Resource not found: " + resourceName);
 
-    // Funkcja do bencowania danych (zwraca bajty)
-    public static byte[] bencode(Object data) throws IllegalArgumentException {
-        if (data instanceof Integer) {
-            StringBuilder sb = new StringBuilder();
-            sb.append((char)105); // 'i'
-            sb.append(data.toString());
-            sb.append((char)101); // 'e'
-            return (sb.toString().getBytes(StandardCharsets.UTF_8));
-        } else if (data instanceof byte[]) {
-            byte[] bytes = (byte[]) data;
-            StringBuilder sb = new StringBuilder();
-            sb.append(String.valueOf(bytes.length).getBytes(StandardCharsets.UTF_8)[0]);
-            for (byte b : bytes) sb.append(b);
-            return (sb.toString().getBytes(StandardCharsets.UTF_8));
-        } else if (data instanceof String) {
-            byte[] encodedBytes = ((String) data).getBytes(StandardCharsets.UTF_8);
-            StringBuilder sb = new StringBuilder();
-            sb.append(String.valueOf(encodedBytes.length).getBytes(StandardCharsets.UTF_8)[0]);
-            for (byte b : encodedBytes) sb.append(b);
-            return (sb.toString().getBytes(StandardCharsets.UTF_8));
-        } else if (data instanceof List) {
-            List<Object> list = (List<Object>) data;
-            byte[] result = new byte[0]; // Placeholder initialization, will be built dynamically
-            return bencodeToBytes(list);
-        } else if (data instanceof Map) {
-            Map<Byte[], Object> dict = (Map<Byte[], Object>) data;
-            List<byte[]> sortedKeys = new ArrayList<>(dict.keySet());
-            Collections.sort(sortedKeys); // Sort keys to ensure consistency with bitTorrent spec
-            return bencodeToBytes(new LinkedHashMap<>(){{ put(key, value); }}); // Will restructure if required
-        } else {
-            throw new IllegalArgumentException("Unsupported type for bencoding: " + data.getClass().getName());
+            return in.readAllBytes();      // Java 9+
         }
     }
 
-    // Funkcja do odbencowania danych (parsuje bajty)
-    public static Object bdecode(byte[] data) throws IllegalArgumentException {
-        if (data == null || data.length == 0) {
-            throw new IllegalArgumentException("Empty input");
-        }
 
-        int index = parseAny(data, 0);
-        if (index < data.length) {
-            throw new IllegalArgumentException("Extra data after parsing at index " + index);
-        }
-        return parseResult(data, index);
-    }
-
-    // Uproszczona implementacja dla bencowania i odbencowania - zwraca bajty bezpośrednio.
-    public static byte[] encode(Object value) throws IllegalArgumentException {
-        if (value instanceof Integer) {
-            StringBuilder sb = new StringBuilder();
-            sb.append((char)105);
-            sb.append(((Integer) value).toString());
-            sb.append((char)101);
-            return (sb.toString().getBytes(StandardCharsets.UTF_8));
-        } else if (value instanceof String) {
-            byte[] bytes = ((String) value).getBytes(StandardCharsets.UTF_8);
-            StringBuilder sb = new StringBuilder();
-            sb.append(String.valueOf(bytes.length).getBytes(StandardCharsets.UTF_8)[0]);
-            for (byte b : bytes) sb.append(b);
-            return (sb.toString().getBytes(StandardCharsets.UTF_8));
-        } else if (value instanceof byte[]) {
-            byte[] bytes = (byte[]) value;
-            StringBuilder sb = new StringBuilder();
-            sb.append(String.valueOf(bytes.length).getBytes(StandardCharsets.UTF_8)[0]);
-            for (byte b : bytes) sb.append(b);
-            return (sb.toString().getBytes(StandardCharsets.UTF_8));
-        } else if (value instanceof List) {
-            List<Object> list = (List<Object>) value;
-            byte[] result = new byte[0]; // Placeholder initialization, will be built dynamically
-            for (Object item : list) {
-                result = concatenate(result, encode(item));
-            }
-            return ((char[])result.concat(new byte[]{(char)101}));
-        } else if (value instanceof Map) {
-
-            byte[] result = new byte[0]; // Placeholder initialization, will be built dynamically
-            HashMap<Byte[], Object> map = new LinkedHashMap<>();
-            for (byte[] key : map.keySet()) {
-                result = concatenate(result, encode(key));
-                result = concatenate(result, encode(map.get(key)));
-            }
-            return ((char[])result.concat(new byte[]{(char)101}));
-        } else {
-            throw new IllegalArgumentException("Unsupported type for bencoding: " + value.getClass().getName());
-        }
-    }
-
-    // Funkcja pomocnicza do konkatu dwóch tablic bajtów
-    private static byte[] concatenate(byte[] arr1, byte[] arr2) throws IllegalArgumentException {
-        byte[] result = new byte[arr1.length + arr2.length];
-        System.arraycopy(arr1, 0, result, 0, arr1.length);
-        System.arraycopy(arr2, 0, result, arr1.length, arr2.length);
-        return result;
-    }
-
-    // Funkcja do zapisu torrent z pliku i wyodrębnienia danych info (Bencodowane)
-    public static void readTorrent() throws Exception {
-        byte[] torrentData = Files.readAllBytes(Paths.get("test.torrent"));
-        Object decoded = bdecode(torrentData);
-        Map<Byte[], Object> infoDict = (Map<Byte[], Object>) decodeMap(decoded, 0)[1];
-        System.out.println(infoDict.get(new byte[]{Byte.parseByte("info")}));
-    }
+    /* ---------- 6. Przykładowe użycie ---------- */
 
     public static void main(String[] args) {
         try {
-            // Przykładowe testowanie bencowania i odbencowania
-            byte[] bencoded = encode("hello");
-            Object decoded = bdecode(bencoded);
-            System.out.println("Odblonowana wartość: " + decoded);
+            // 1️⃣ Kodowanie/odkodowywanie prostego przykładu
+            byte[] encoded = bencode("hello");
+            System.out.println("Encoded: " + Arrays.toString(encoded));
 
-            // Przeczytaj plik torrent i wyświetl dane info
-            readTorrent();
+            Object decoded = bdecode(encoded);
+            if (decoded instanceof byte[]) {
+                String s = new String((byte[]) decoded, StandardCharsets.UTF_8);
+                System.out.println("Decoded string: " + s);
+            }
+
+            // 2️⃣ Czytanie pliku .torrent i wypisanie sekcji "info"
+            Map<String, Object> info = readTorrentInfo("test.torrent", true);
+            System.out.println("\n--- INFO SECTION ---");
+            for (Map.Entry<String, Object> e : info.entrySet()) {
+                System.out.printf("%s: %s%n", e.getKey(), e.getValue());
+            }
+
         } catch (Exception e) {
             e.printStackTrace();
         }
     }
-
 }
-
