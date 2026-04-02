@@ -147,9 +147,9 @@ public final class PeerFetcher {
 
     private static long getLong(Map<String, Object> map, String key) {
         Object val = map.get(key);
-        if (!(val instanceof Integer))
+        if (!(val instanceof Long))
             throw new IllegalArgumentException("Expected int for key: " + key);
-        return (Integer) val;
+        return (Long) val;
     }
 
     /** Generuje 20‑bajtowy peer_id typu "-JA0001-XXXX..." */

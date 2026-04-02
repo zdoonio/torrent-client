@@ -48,8 +48,8 @@ public class BEncoderDecoder {
      * @return bajty z kodem bencoded
      */
     public static byte[] bencode(Object obj) {
-        if (obj instanceof Integer)
-            return encodeInt((Integer) obj);
+        if (obj instanceof Long)
+            return encodeNumber((Long) obj);
 
         if (obj instanceof String)
             return encodeString(((String) obj).getBytes(StandardCharsets.UTF_8));
@@ -69,7 +69,7 @@ public class BEncoderDecoder {
 
     /* ---------- 3. Pomocnicze metody kodowania ---------- */
 
-    private static byte[] encodeInt(Integer i) {
+    private static byte[] encodeNumber(Long i) {
         return ("i" + i + "e").getBytes(StandardCharsets.UTF_8);
     }
 
@@ -119,7 +119,7 @@ public class BEncoderDecoder {
     private static DecodeResult parseAny(byte[] data, int idx) {
         byte first = data[idx];
         if (first == 'i')
-            return parseInt(data, idx);
+            return parseNumber(data, idx);
         if (first == 'l')
             return parseList(data, idx);
         if (first == 'd')
@@ -131,11 +131,11 @@ public class BEncoderDecoder {
                 "Invalid bencode type at index " + idx + ": " + (char) first);
     }
 
-    private static DecodeResult parseInt(byte[] data, int idx) {
+    private static DecodeResult parseNumber(byte[] data, int idx) {
         // format: i<digits>e
         int end = indexOfByte(data, (byte) 'e', idx + 1);
         String num = new String(data, idx + 1, end - idx - 1, StandardCharsets.UTF_8);
-        return new DecodeResult(Integer.parseInt(num), end + 1);
+        return new DecodeResult(Long.parseLong(num), end + 1);
     }
 
     private static DecodeResult parseString(byte[] data, int idx) {
