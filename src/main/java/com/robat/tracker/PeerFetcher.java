@@ -13,6 +13,8 @@ import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.*;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * Pobiera listę peerów z trackera na podstawie pliku .torrent.
@@ -30,45 +32,69 @@ public final class PeerFetcher {
         @SuppressWarnings("unchecked")
         Map<String, Object> torrentMap = (Map<String, Object>) decodedRoot;
 
-        String announceUrl = getString(torrentMap, "announce");
+        List<String> announceUrls = getStringList(torrentMap, "announce-list");
 
-        /* ---------- 2️⃣ – sprawdzamy protokół ---------- */
+        List<Peer> peers = new ArrayList<>();
+
+        for (String announceUrl : announceUrls) {
+            /* ---------- 2️⃣ – sprawdzamy protokół ---------- */
+            URI uri;
+            try {
+                uri = new URI(announceUrl);
+            } catch (URISyntaxException e) {
+                throw new IOException("Invalid announce URL: " + announceUrl, e);
+            }
+            String scheme = uri.getScheme();   // http / https / udp
+
+            /* ---------- 3️⃣ – obliczamy info_hash i left tak samo jak wcześniej ---------- */
+            Object infoObj = torrentMap.get("info");
+            if (!(infoObj instanceof Map))
+                throw new IllegalArgumentException("'info' key missing or not a dict");
+            @SuppressWarnings("unchecked")
+            Map<String, Object> infoDict = (Map<String, Object>) infoObj;
+
+            byte[] infoBencoded = BEncoderDecoder.bencode(infoDict);
+            MessageDigest md;
+            try {
+                md = MessageDigest.getInstance("SHA-1");
+            } catch (NoSuchAlgorithmException e) {
+                throw new RuntimeException(e);
+            }
+            byte[] infoHash = md.digest(infoBencoded);
+
+            long left;
+            if (infoDict.containsKey("length")) {
+                left = getLong(infoDict, "length");
+            } else if (infoDict.containsKey("files")) {
+                @SuppressWarnings("unchecked")
+                List<Map<String, Object>> files =
+                        (List<Map<String, Object>>) infoDict.get("files");
+                left = files.stream().mapToLong(f -> getLong(f, "length")).sum();
+            } else {
+                throw new IllegalArgumentException(
+                        "info dict has neither 'length' nor 'files'");
+            }
+            try {
+                peers.addAll(fetchPeersWithRetry(announceUrl, torrentMap, infoHash, left));
+            } catch (Exception e) {
+                System.err.println("Failed with tracker " + announceUrl + ": " + e.getMessage());
+                continue; // Try next tracker
+            }
+        }
+        return peers;
+    }
+
+    private static List<Peer> fetchPeersWithRetry(String announceUrl,
+                                                  Map<String, Object> torrentMap,
+                                                  byte[] infoHash,
+                                                  long left) throws IOException {
         URI uri;
         try {
             uri = new URI(announceUrl);
         } catch (URISyntaxException e) {
             throw new IOException("Invalid announce URL: " + announceUrl, e);
         }
-        String scheme = uri.getScheme();   // http / https / udp
-
-        /* ---------- 3️⃣ – obliczamy info_hash i left tak samo jak wcześniej ---------- */
-        Object infoObj = torrentMap.get("info");
-        if (!(infoObj instanceof Map))
-            throw new IllegalArgumentException("'info' key missing or not a dict");
-        @SuppressWarnings("unchecked")
-        Map<String, Object> infoDict = (Map<String, Object>) infoObj;
-
-        byte[] infoBencoded = BEncoderDecoder.bencode(infoDict);
-        MessageDigest md;
-        try {
-            md = MessageDigest.getInstance("SHA-1");
-        } catch (NoSuchAlgorithmException e) {
-            throw new RuntimeException(e);
-        }
-        byte[] infoHash = md.digest(infoBencoded);
-
-        long left;
-        if (infoDict.containsKey("length")) {
-            left = getLong(infoDict, "length");
-        } else if (infoDict.containsKey("files")) {
-            @SuppressWarnings("unchecked")
-            List<Map<String, Object>> files =
-                    (List<Map<String, Object>>) infoDict.get("files");
-            left = files.stream().mapToLong(f -> getLong(f, "length")).sum();
-        } else {
-            throw new IllegalArgumentException(
-                    "info dict has neither 'length' nor 'files'");
-        }
+        String scheme = uri.getScheme();
 
         /* ---------- 4️⃣ – w zależności od protokołu wywołujemy odpowiedni kod ---------- */
         if ("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme)) {
@@ -88,7 +114,7 @@ public final class PeerFetcher {
     private static List<Peer> fetchPeersHTTP(String base,
                                              byte[] infoHash,
                                              long left) throws IOException {
-        Map<String,Object> params = new LinkedHashMap<>();
+        Map<String, Object> params = new LinkedHashMap<>();
         params.put("info_hash", infoHash);
         params.put("peer_id", generatePeerId());
         params.put("port", 6881);
@@ -106,8 +132,8 @@ public final class PeerFetcher {
                 (HttpURLConnection) new URL(fullUrl).openConnection();
         conn.setRequestProperty("User-Agent",
                 "Java-BitTorrent-Client/1.0");
-        conn.setConnectTimeout(10000);
-        conn.setReadTimeout(10000);
+        conn.setConnectTimeout(250);
+        conn.setReadTimeout(250);
 
         int status = conn.getResponseCode();
         if (status != 200)
@@ -129,8 +155,8 @@ public final class PeerFetcher {
             throw new IllegalArgumentException(
                     "Tracker response is not a dictionary");
         @SuppressWarnings("unchecked")
-        Map<String,Object> trackerMap =
-                (Map<String,Object>) trackerDecoded;
+        Map<String, Object> trackerMap =
+                (Map<String, Object>) trackerDecoded;
 
         if (trackerMap.containsKey("failure reason")) {
             String reason = new String((byte[]) trackerMap.get("failure reason"),
@@ -162,7 +188,7 @@ public final class PeerFetcher {
         int port = uri.getPort();   // 1337
 
         try (DatagramSocket socket = new DatagramSocket()) {
-            socket.setSoTimeout(15000);
+            socket.setSoTimeout(250);
 
             /* ---- 1️⃣ connect request ------------------------------------ */
             byte[] req = new byte[16];
@@ -199,7 +225,7 @@ public final class PeerFetcher {
             annReq.putLong(0L);           // downloaded
             annReq.putLong(0L);           // uploaded
             annReq.putInt(0);             // event: none (0)
-            annReq.putShort((short)6881);  // IP address (0 – let tracker fill)
+            annReq.putShort((short) 6881);  // IP address (0 – let tracker fill)
             annReq.putInt(0);             // key
             annReq.putInt(-1);            // num_want
 
@@ -227,10 +253,10 @@ public final class PeerFetcher {
             while (ar.remaining() >= 6) {
                 long ipLong = Integer.toUnsignedLong(ar.getInt());
                 String ip = String.format("%d.%d.%d.%d",
-                        (int)(ipLong >> 24 & 0xFF),
-                        (int)(ipLong >> 16 & 0xFF),
-                        (int)(ipLong >> 8 & 0xFF),
-                        (int)(ipLong & 0xFF));
+                        (int) (ipLong >> 24 & 0xFF),
+                        (int) (ipLong >> 16 & 0xFF),
+                        (int) (ipLong >> 8 & 0xFF),
+                        (int) (ipLong & 0xFF));
                 int portNum = ar.getShort() & 0xFFFF;
                 peers.add(new Peer(ip, portNum));
             }
@@ -252,6 +278,38 @@ public final class PeerFetcher {
         return new String((byte[]) val, StandardCharsets.UTF_8);
     }
 
+    private static List<String> getStringList(Map<String, Object> map, String key) {
+        Object val = map.get(key);
+
+        // Sprawdzamy czy wartość jest ArrayList
+        if (!(val instanceof ArrayList)) {
+            throw new IllegalArgumentException("Expected ArrayList for key: " + key);
+        }
+
+        @SuppressWarnings("unchecked")
+        ArrayList<Object> arrayList = (ArrayList<Object>) val;
+
+        // Flatten i konwersja wszystkich byte[] do String
+        return arrayList.stream()
+                .flatMap(item -> {
+                    if (item instanceof List) {
+                        // Jeśli element to lista, flattenujemy ją
+                        @SuppressWarnings("unchecked")
+                        List<Object> innerList = (List<Object>) item;
+                        return innerList.stream()
+                                .filter(innerItem -> innerItem instanceof byte[])
+                                .map(innerItem -> new String((byte[]) innerItem, StandardCharsets.UTF_8));
+                    } else if (item instanceof byte[]) {
+                        // Jeśli element to pojedynczy byte[]
+                        return Stream.of(new String((byte[]) item, StandardCharsets.UTF_8));
+                    }
+                    return Stream.empty();
+                })
+                .collect(Collectors.toList());
+    }
+
+
+
     private static long getLong(Map<String, Object> map, String key) {
         Object val = map.get(key);
         if (!(val instanceof Long))
@@ -259,7 +317,9 @@ public final class PeerFetcher {
         return (Long) val;
     }
 
-    /** Generuje 20‑bajtowy peer_id typu "-JA0001-XXXX..." */
+    /**
+     * Generuje 20‑bajtowy peer_id typu "-JA0001-XXXX..."
+     */
     private static byte[] generatePeerId() {
         String prefix = "-JA0001-";
         byte[] random = new byte[20 - prefix.length()];
@@ -270,7 +330,9 @@ public final class PeerFetcher {
         return buf.array();
     }
 
-    /** Buduje URL z parametrami (bytes są kodowane w %XX) */
+    /**
+     * Buduje URL z parametrami (bytes są kodowane w %XX)
+     */
     private static String buildAnnounceUrl(String base, Map<String, Object> params)
             throws IOException {
 
@@ -294,7 +356,9 @@ public final class PeerFetcher {
         return base.contains("?") ? base + "&" + query : base + "?" + query;
     }
 
-    /** Rozkodowuje format compact oraz non‑compact */
+    /**
+     * Rozkodowuje format compact oraz non‑compact
+     */
     private static List<Peer> parsePeers(Object peersObj) {
         if (peersObj instanceof byte[]) {
             byte[] data = (byte[]) peersObj;
@@ -330,7 +394,9 @@ public final class PeerFetcher {
         }
     }
 
-    /** Prosta struktura peer – tylko IP i port */
+    /**
+     * Prosta struktura peer – tylko IP i port
+     */
     public static final class Peer {
         public final String ip;
         public final int port;
@@ -341,7 +407,9 @@ public final class PeerFetcher {
         }
 
         @Override
-        public String toString() { return ip + ":" + port; }
+        public String toString() {
+            return ip + ":" + port;
+        }
     }
 
     /* ------------------------------------------------------------------ */
