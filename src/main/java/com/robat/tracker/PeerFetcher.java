@@ -5,14 +5,13 @@ import com.robat.bittorrent.BEncoderDecoder;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
-import java.net.URLEncoder;
+import java.net.*;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.*;
 
 /**
@@ -22,44 +21,42 @@ public final class PeerFetcher {
 
     private PeerFetcher() { /* utility */ }
 
-    /**
-     * Zwraca listę (ip, port) dla danego torrentu.
-     *
-     * @param torrentPath ścieżka do pliku .torrent
-     * @return lista par (IP, port)
-     * @throws IOException          przy błędach I/O lub HTTP‑ie
-     * @throws IllegalArgumentException jeśli torrent jest niepoprawny
-     */
     public static List<Peer> getPeers(String torrentPath) throws IOException {
-        // 1️⃣ Wczytanie i zdekodowanie torrentu
+        /* ---------- 1️⃣ – wczytanie torrentu i obliczenie info_hash, left … ---------- */
         byte[] torrentData = Files.readAllBytes(Path.of(torrentPath));
         Object decodedRoot = BEncoderDecoder.bdecode(torrentData);
         if (!(decodedRoot instanceof Map))
             throw new IllegalArgumentException("Torrent root is not a dictionary");
-
         @SuppressWarnings("unchecked")
         Map<String, Object> torrentMap = (Map<String, Object>) decodedRoot;
 
-        // 2️⃣ Pobranie kluczy potrzebnych do zapytania
         String announceUrl = getString(torrentMap, "announce");
+
+        /* ---------- 2️⃣ – sprawdzamy protokół ---------- */
+        URI uri;
+        try {
+            uri = new URI(announceUrl);
+        } catch (URISyntaxException e) {
+            throw new IOException("Invalid announce URL: " + announceUrl, e);
+        }
+        String scheme = uri.getScheme();   // http / https / udp
+
+        /* ---------- 3️⃣ – obliczamy info_hash i left tak samo jak wcześniej ---------- */
         Object infoObj = torrentMap.get("info");
         if (!(infoObj instanceof Map))
             throw new IllegalArgumentException("'info' key missing or not a dict");
-
         @SuppressWarnings("unchecked")
         Map<String, Object> infoDict = (Map<String, Object>) infoObj;
 
-        // 3️⃣ Obliczanie info_hash
         byte[] infoBencoded = BEncoderDecoder.bencode(infoDict);
-        byte[] infoHash;
+        MessageDigest md;
         try {
-            MessageDigest md = MessageDigest.getInstance("SHA-1");
-            infoHash = md.digest(infoBencoded);
-        } catch (Exception e) { // nie powinno się zdarzyć
+            md = MessageDigest.getInstance("SHA-1");
+        } catch (NoSuchAlgorithmException e) {
             throw new RuntimeException(e);
         }
+        byte[] infoHash = md.digest(infoBencoded);
 
-        // 4️⃣ Obliczanie wartości „left”
         long left;
         if (infoDict.containsKey("length")) {
             left = getLong(infoDict, "length");
@@ -73,25 +70,42 @@ public final class PeerFetcher {
                     "info dict has neither 'length' nor 'files'");
         }
 
-        // 5️⃣ Tworzenie parametrów zapytania
-        Map<String, Object> params = new LinkedHashMap<>();
-        params.put("info_hash", infoHash);                // bytes
-        params.put("peer_id", generatePeerId());          // bytes
+        /* ---------- 4️⃣ – w zależności od protokołu wywołujemy odpowiedni kod ---------- */
+        if ("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme)) {
+            // --- HTTP/HTTPS path (już istnieje)
+            return fetchPeersHTTP(announceUrl, infoHash, left);
+        } else if ("udp".equalsIgnoreCase(scheme)) {
+            // --- UDP tracker
+            byte[] peerId = generatePeerId();   // 20‑bajtowy peer_id
+            return fetchPeersUDP(announceUrl, infoHash, peerId, left);
+        } else {
+            throw new IOException("Unsupported announce protocol: " + scheme);
+        }
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* ---------- HTTP/HTTPS (twoja oryginalna logika) ----------------- */
+    private static List<Peer> fetchPeersHTTP(String base,
+                                             byte[] infoHash,
+                                             long left) throws IOException {
+        Map<String,Object> params = new LinkedHashMap<>();
+        params.put("info_hash", infoHash);
+        params.put("peer_id", generatePeerId());
         params.put("port", 6881);
         params.put("uploaded", 0L);
         params.put("downloaded", 0L);
         params.put("left", left);
-        params.put("compact", 1);                         // chcemy compact
+        params.put("compact", 1);
         params.put("event", "started");
         params.put("numwant", 50);
 
-        String fullUrl = buildAnnounceUrl(announceUrl, params);
-
+        String fullUrl = buildAnnounceUrl(base, params);
         System.out.println("\nFull announce URL: " + fullUrl);
 
-        // 6️⃣ Wysyłanie żądania HTTP GET
-        HttpURLConnection conn = (HttpURLConnection) new URL(fullUrl).openConnection();
-        conn.setRequestProperty("User-Agent", "Java-BitTorrent-Client/1.0");
+        HttpURLConnection conn =
+                (HttpURLConnection) new URL(fullUrl).openConnection();
+        conn.setRequestProperty("User-Agent",
+                "Java-BitTorrent-Client/1.0");
         conn.setConnectTimeout(10000);
         conn.setReadTimeout(10000);
 
@@ -110,29 +124,122 @@ public final class PeerFetcher {
             responseData = bos.toByteArray();
         }
 
-        // 7️⃣ Dekodowanie odpowiedzi
         Object trackerDecoded = BEncoderDecoder.bdecode(responseData);
         if (!(trackerDecoded instanceof Map))
-            throw new IllegalArgumentException("Tracker response is not a dictionary");
-
+            throw new IllegalArgumentException(
+                    "Tracker response is not a dictionary");
         @SuppressWarnings("unchecked")
-        Map<String, Object> trackerMap = (Map<String, Object>) trackerDecoded;
+        Map<String,Object> trackerMap =
+                (Map<String,Object>) trackerDecoded;
 
-        // 8️⃣ Obsługa ewentualnych błędów
         if (trackerMap.containsKey("failure reason")) {
-            String reason =
-                    new String((byte[]) trackerMap.get("failure reason"),
-                            StandardCharsets.UTF_8);
+            String reason = new String((byte[]) trackerMap.get("failure reason"),
+                    StandardCharsets.UTF_8);
             throw new IOException("Tracker failure: " + reason);
         }
 
-        // 9️⃣ Pobranie peerów
         Object peersObj = trackerMap.get("peers");
         if (peersObj == null)
             throw new IllegalArgumentException("'peers' key missing in tracker response");
 
         return parsePeers(peersObj);
     }
+
+    /* ------------------------------------------------------------------ */
+    /* ---------- UDP tracker ------------------------------------------- */
+    private static List<Peer> fetchPeersUDP(String announceUrl,
+                                            byte[] infoHash,
+                                            byte[] peerId,
+                                            long left) throws IOException {
+        // split: udp://host:port/announce
+        URI uri;
+        try {
+            uri = new URI(announceUrl);
+        } catch (URISyntaxException e) {
+            throw new IOException("Invalid UDP announce URL", e);
+        }
+        String host = uri.getHost();
+        int port = uri.getPort();   // 1337
+
+        try (DatagramSocket socket = new DatagramSocket()) {
+            socket.setSoTimeout(15000);
+
+            /* ---- 1️⃣ connect request ------------------------------------ */
+            byte[] req = new byte[16];
+            ByteBuffer bb = ByteBuffer.wrap(req);
+            bb.putInt(0);                 // action: connect
+            int transId = new Random().nextInt();
+            bb.putInt(transId);
+
+            socket.send(new DatagramPacket(req, req.length,
+                    InetAddress.getByName(host), port));
+
+            /* ---- 2️⃣ connect response ----------------------------------- */
+            byte[] resp = new byte[16];
+            DatagramPacket packet = new DatagramPacket(resp, resp.length);
+            socket.receive(packet);
+
+            ByteBuffer br = ByteBuffer.wrap(resp);
+            int action = br.getInt();
+            int rTransId = br.getInt();
+            long connId = br.getLong();
+
+            if (action != 0 || rTransId != transId)
+                throw new IOException("Bad connect response");
+
+            /* ---- 3️⃣ announce request ----------------------------------- */
+            ByteBuffer annReq = ByteBuffer.allocate(98);
+            annReq.putLong(connId);       // connection_id
+            annReq.putInt(1);             // action: announce
+            int aTransId = new Random().nextInt();
+            annReq.putInt(aTransId);
+            annReq.put(infoHash);         // 20 bytes
+            annReq.put(peerId);           // 20 bytes
+            annReq.putLong(left);          // left
+            annReq.putLong(0L);           // downloaded
+            annReq.putLong(0L);           // uploaded
+            annReq.putInt(0);             // event: none (0)
+            annReq.putShort((short)6881);  // IP address (0 – let tracker fill)
+            annReq.putInt(0);             // key
+            annReq.putInt(-1);            // num_want
+
+            socket.send(new DatagramPacket(annReq.array(), annReq.capacity(),
+                    InetAddress.getByName(host), port));
+
+            /* ---- 4️⃣ announce response ---------------------------------- */
+            byte[] annResp = new byte[1024];
+            packet = new DatagramPacket(annResp, annResp.length);
+            socket.receive(packet);
+
+            ByteBuffer ar = ByteBuffer.wrap(packet.getData(), 0, packet.getLength());
+            int aAction = ar.getInt();
+            int aTransIdRec = ar.getInt();
+
+            if (aAction != 1 || aTransIdRec != aTransId)
+                throw new IOException("Bad announce response");
+
+            int interval = ar.getInt();   // ignore
+            int leechers = ar.getInt();   // ignore
+            int seeders = ar.getInt();    // ignore
+
+            /* ---- 5️⃣ parse peers --------------------------------------- */
+            List<Peer> peers = new ArrayList<>();
+            while (ar.remaining() >= 6) {
+                long ipLong = Integer.toUnsignedLong(ar.getInt());
+                String ip = String.format("%d.%d.%d.%d",
+                        (int)(ipLong >> 24 & 0xFF),
+                        (int)(ipLong >> 16 & 0xFF),
+                        (int)(ipLong >> 8 & 0xFF),
+                        (int)(ipLong & 0xFF));
+                int portNum = ar.getShort() & 0xFFFF;
+                peers.add(new Peer(ip, portNum));
+            }
+            return peers;
+        } catch (SocketTimeoutException e) {
+            throw new IOException("UDP tracker timed out", e);
+        }
+    }
+
 
     /* ------------------------------------------------------------------ */
     /* --------------------- pomocnicze metody poniżej ------------------- */
