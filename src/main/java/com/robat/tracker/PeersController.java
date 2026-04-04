@@ -26,9 +26,11 @@ public class PeersController {
     @PostMapping("/download")
     public ResponseEntity<String> download(@RequestParam("torrent") String torrentPath,
                                            @RequestParam("output") String outputPath) {
+
         try {
             List<PeerFetcher.Peer> peers = peerService.getPeers(torrentPath);
             TorrentDownloader downloader = new TorrentDownloader(torrentPath, peers);
+            downloader.validateTorrent(torrentPath);
             downloader.downloadToFile(outputPath);
             return ResponseEntity.ok("Download complete.");
         } catch (Exception e) {

@@ -1,7 +1,10 @@
 package com.robat.p2p;
 
+import com.robat.bittorrent.SHA1Hasher;
+
 import java.io.*;
 import java.net.*;
+import java.util.Arrays;
 
 public class PeerConnection {
 
@@ -80,4 +83,45 @@ public class PeerConnection {
     public boolean isConnected() {
         return socket != null && socket.isConnected() && !socket.isClosed();
     }
+
+    public void testPeerConnection() throws Exception {
+        System.out.println("Testing connection to " + ip + ":" + port);
+
+        Socket socket = new Socket();
+        try {
+            socket.connect(new InetSocketAddress(ip, port), 5000);
+            socket.setSoTimeout(5000);
+
+            DataInputStream in = new DataInputStream(socket.getInputStream());
+            DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+
+            // Wyślij handshake
+            byte[] handshake = buildHandshake();
+            out.write(handshake);
+            out.flush();
+
+            // Odbierz odpowiedź
+            byte[] response = in.readNBytes(68);
+
+            System.out.println("Handshake response: " + Arrays.toString(response));
+            System.out.println("✅ Connection successful!");
+
+        } finally {
+            socket.close();
+        }
+    }
+
+    private byte[] buildHandshake() throws Exception {
+        String pstr = "BitTorrent protocol";
+        byte[] reserved = new byte[8];
+        byte[] infoHash = SHA1Hasher.calculateInfoHash("test.torrent"); // użyj właściwego pliku
+        String peerId = "-PY0001-000000000000";
+
+        return new byte[] {
+                (byte) pstr.length(),
+                66, 105, 116, 84, 111, 117, 114, 114, 101, 110, 116,
+                32, 112, 114, 111, 116, 111, 99, 111, 108 // "BitTorrent protocol"
+        };
+    }
+
 }

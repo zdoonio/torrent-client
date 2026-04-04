@@ -271,13 +271,6 @@ public final class PeerFetcher {
     /* --------------------- pomocnicze metody poniżej ------------------- */
     /* ------------------------------------------------------------------ */
 
-    private static String getString(Map<String, Object> map, String key) {
-        Object val = map.get(key);
-        if (!(val instanceof byte[]))
-            throw new IllegalArgumentException("Expected bytes for key: " + key);
-        return new String((byte[]) val, StandardCharsets.UTF_8);
-    }
-
     private static List<String> getStringList(Map<String, Object> map, String key) {
         Object val = map.get(key);
 
