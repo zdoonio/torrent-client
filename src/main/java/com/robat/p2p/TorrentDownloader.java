@@ -35,7 +35,7 @@ public class TorrentDownloader {
         Map<String, Object> info = (Map<String, Object>) decoded.get("info");
         byte[] infoHash = SHA1Hasher.calculateInfoHash(torrentPath);
 
-        int pieceLength = (Integer) info.get("piece length");
+        long pieceLength = (Long) info.get("piece length");
         byte[] pieces = (byte[]) info.get("pieces");
 
         int numPieces = pieces.length / 20;
@@ -58,8 +58,8 @@ public class TorrentDownloader {
                 for (int i = 0; i < numPieces && downloadedPieces.size() < numPieces; i++) {
                     if (downloadedPieces.containsKey(i)) continue;
 
-                    int pieceSize = (i == numPieces - 1) ?
-                            ((Integer) info.get("length")) - (i * pieceLength) : pieceLength;
+                    long pieceSize = (i == numPieces - 1) ?
+                            ((Long) info.get("length")) - (i * pieceLength) : pieceLength;
 
                     byte[] pieceData = downloadPiece(peerConn, i, pieceSize);
                     if (pieceData != null) {
@@ -88,7 +88,7 @@ public class TorrentDownloader {
         System.out.println("Download complete.");
     }
 
-    private byte[] downloadPiece(PeerConnection peer, int pieceIndex, int length) throws IOException {
+    private byte[] downloadPiece(PeerConnection peer, int pieceIndex, long length) throws IOException {
         // Wysyłamy request
         BitTorrentProtocol.sendRequest(peer, pieceIndex, 0, Math.min(16384, length));
 

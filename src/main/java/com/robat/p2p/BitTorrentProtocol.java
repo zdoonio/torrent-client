@@ -10,7 +10,7 @@ public class BitTorrentProtocol {
         peer.send(msg);
     }
 
-    public static void sendRequest(PeerConnection peer, int pieceIndex, int begin, int length) throws IOException {
+    public static void sendRequest(PeerConnection peer, int pieceIndex, int begin, long length) throws IOException {
         byte[] msg = new byte[13];
         msg[0] = (byte)(length >> 24 & 0xFF);
         msg[1] = (byte)(length >> 16 & 0xFF);
