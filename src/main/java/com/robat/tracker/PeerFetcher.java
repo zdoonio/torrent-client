@@ -132,8 +132,8 @@ public final class PeerFetcher {
                 (HttpURLConnection) new URL(fullUrl).openConnection();
         conn.setRequestProperty("User-Agent",
                 "Java-BitTorrent-Client/1.0");
-        conn.setConnectTimeout(250);
-        conn.setReadTimeout(250);
+        conn.setConnectTimeout(1000);
+        conn.setReadTimeout(1000);
 
         int status = conn.getResponseCode();
         if (status != 200)

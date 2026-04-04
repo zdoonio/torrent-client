@@ -1,11 +1,14 @@
 package com.robat.p2p;
 
 import java.io.*;
+import java.net.*;
 import java.util.Arrays;
 
 public class BitTorrentHandshake {
 
     public static boolean performHandshake(PeerConnection peer, byte[] infoHash, String peerId) throws IOException {
+        System.out.println("Performing handshake with " + peer.getClass().getSimpleName());
+
         // Prepare handshake message
         byte[] pstr = "BitTorrent protocol".getBytes();
         byte[] reserved = new byte[8]; // all zeros
@@ -21,22 +24,29 @@ public class BitTorrentHandshake {
         offset += infoHash.length;
         System.arraycopy(peerId.getBytes(), 0, handshake, offset, peerId.getBytes().length);
 
-        peer.send(handshake);
+        try {
+            peer.send(handshake);
 
-        // Receive response
-        byte[] response = peer.receiveExact(68);
+            // Receive response
+            byte[] response = peer.receiveExact(68);
 
-        // Check pstrlen and pstr
-        if (response[0] != pstr.length || !Arrays.equals(Arrays.copyOfRange(response, 1, 20), pstr)) {
-            return false;
+            // Check pstrlen and pstr
+            if (response[0] != pstr.length || !Arrays.equals(Arrays.copyOfRange(response, 1, 20), pstr)) {
+                System.err.println("Invalid handshake response from " + peer.getClass().getSimpleName());
+                return false;
+            }
+
+            // Check info_hash
+            if (!Arrays.equals(Arrays.copyOfRange(response, 28, 48), infoHash)) {
+                System.err.println("Info hash mismatch");
+                return false;
+            }
+
+            System.out.println("Handshake successful with " + peer.getClass().getSimpleName());
+            return true;
+        } catch (IOException e) {
+            System.err.println("Handshake failed: " + e.getMessage());
+            throw e;
         }
-
-        // Check info_hash
-        if (!Arrays.equals(Arrays.copyOfRange(response, 28, 48), infoHash)) {
-            return false;
-        }
-
-        return true;
     }
 }
-
