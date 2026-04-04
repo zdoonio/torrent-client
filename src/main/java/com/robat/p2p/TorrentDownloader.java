@@ -192,7 +192,7 @@ public class TorrentDownloader {
                 (value != null ? value.getClass() : "null"));
     }
 
-    private static String getString(Map<String, Object> map, String key) {
+    public static String getString(Map<String, Object> map, String key) {
         Object val = map.get(key);
         if (!(val instanceof byte[]))
             throw new IllegalArgumentException("Expected bytes for key: " + key);

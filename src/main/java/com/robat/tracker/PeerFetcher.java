@@ -132,8 +132,8 @@ public final class PeerFetcher {
                 (HttpURLConnection) new URL(fullUrl).openConnection();
         conn.setRequestProperty("User-Agent",
                 "Java-BitTorrent-Client/1.0");
-        conn.setConnectTimeout(1000);
-        conn.setReadTimeout(1000);
+        conn.setConnectTimeout(10000);
+        conn.setReadTimeout(10000);
 
         int status = conn.getResponseCode();
         if (status != 200)
@@ -188,7 +188,7 @@ public final class PeerFetcher {
         int port = uri.getPort();   // 1337
 
         try (DatagramSocket socket = new DatagramSocket()) {
-            socket.setSoTimeout(250);
+            socket.setSoTimeout(10000);
 
             /* ---- 1️⃣ connect request ------------------------------------ */
             byte[] req = new byte[16];
